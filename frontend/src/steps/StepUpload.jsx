@@ -2,6 +2,18 @@ import { useState, useRef } from 'react';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
+async function pollJob(jobId, intervalMs = 3000, timeoutMs = 180000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const res = await fetch(`${API}/proposal/job/${jobId}`);
+    const job = await res.json();
+    if (job.status === 'done') return job;
+    if (job.status === 'error') throw new Error(job.error || 'Job failed');
+  }
+  throw new Error('Timed out waiting for Claude — please try again');
+}
+
 export default function StepUpload({ onParsed }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -20,7 +32,9 @@ export default function StepUpload({ onParsed }) {
       const res = await fetch(`${API}/proposal/parse`, { method: 'POST', body: form });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Upload failed');
-      onParsed(data.parsed);
+
+      const job = await pollJob(data.jobId);
+      onParsed(job.parsed);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -40,7 +54,7 @@ export default function StepUpload({ onParsed }) {
       <div className="card">
         <div className="loading">
           <div className="spinner" />
-          <span>Parsing RFP with Claude AI — this may take 15–30 seconds...</span>
+          <span>Parsing RFP with Claude AI — this may take 60–90 seconds...</span>
         </div>
       </div>
     );

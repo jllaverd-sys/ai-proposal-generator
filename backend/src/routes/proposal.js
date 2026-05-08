@@ -8,6 +8,24 @@ import { parseRFP, generateProposal, costProposal } from '../services/claudeServ
 
 export const proposalRouter = express.Router();
 
+// In-memory job store — fine for single-instance free tier
+const jobs = new Map();
+
+function createJob() {
+  const id = Math.random().toString(36).slice(2, 10);
+  jobs.set(id, { status: 'pending' });
+  // Auto-clean after 10 minutes
+  setTimeout(() => jobs.delete(id), 10 * 60 * 1000);
+  return id;
+}
+
+// GET /api/proposal/job/:id  — poll for async job result
+proposalRouter.get('/job/:id', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
+});
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
@@ -25,27 +43,34 @@ const upload = multer({
   },
 });
 
-// POST /api/proposal/parse  — upload RFP, get structured data back
+// POST /api/proposal/parse  — upload RFP, returns jobId immediately
 proposalRouter.post('/parse', upload.single('rfp'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-    console.log(`Parsing RFP: ${req.file.originalname} (${req.file.mimetype})`);
-    const text = await extractTextFromFile(req.file.buffer, req.file.mimetype);
+  const jobId = createJob();
+  res.json({ jobId });  // respond immediately — client polls /job/:id
 
-    if (!text || text.trim().length < 50) {
-      return res.status(400).json({ error: 'Could not extract readable text from the file' });
+  // Run Claude in background
+  (async () => {
+    try {
+      console.log(`Parsing RFP: ${req.file.originalname} (${req.file.mimetype})`);
+      const text = await extractTextFromFile(req.file.buffer, req.file.mimetype);
+
+      if (!text || text.trim().length < 50) {
+        jobs.set(jobId, { status: 'error', error: 'Could not extract readable text from the file' });
+        return;
+      }
+
+      const relevantText = extractRelevantText(text);
+      console.log(`Sending ${relevantText.length} characters to Claude...`);
+      const parsed = await parseRFP(relevantText);
+      jobs.set(jobId, { status: 'done', parsed });
+      console.log(`Parse job ${jobId} complete`);
+    } catch (err) {
+      console.error('Parse error:', err.message);
+      jobs.set(jobId, { status: 'error', error: err.message });
     }
-
-    const relevantText = extractRelevantText(text);
-    console.log(`Sending ${relevantText.length} characters to Claude...`);
-    const parsed = await parseRFP(relevantText);
-
-    res.json({ success: true, parsed });
-  } catch (err) {
-    console.error('Parse error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
+  })();
 });
 
 // POST /api/proposal/refine  — apply user answers to update scope (no Claude call)
@@ -94,18 +119,23 @@ proposalRouter.post('/cost', async (req, res) => {
   }
 });
 
-// POST /api/proposal/generate  — take parsed data + user answers, produce proposal text
+// POST /api/proposal/generate  — returns jobId immediately
 proposalRouter.post('/generate', async (req, res) => {
-  try {
-    const { parsed, answers } = req.body;
-    if (!parsed) return res.status(400).json({ error: 'Missing parsed RFP data' });
+  const { parsed, answers } = req.body;
+  if (!parsed) return res.status(400).json({ error: 'Missing parsed RFP data' });
 
-    console.log('Generating proposal...');
-    const proposal = await generateProposal(parsed, answers);
+  const jobId = createJob();
+  res.json({ jobId });
 
-    res.json({ success: true, proposal });
-  } catch (err) {
-    console.error('Generate error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
+  (async () => {
+    try {
+      console.log('Generating proposal...');
+      const proposal = await generateProposal(parsed, answers);
+      jobs.set(jobId, { status: 'done', proposal });
+      console.log(`Generate job ${jobId} complete`);
+    } catch (err) {
+      console.error('Generate error:', err.message);
+      jobs.set(jobId, { status: 'error', error: err.message });
+    }
+  })();
 });

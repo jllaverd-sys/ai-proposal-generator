@@ -2,6 +2,18 @@ import { useState, useEffect } from 'react';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
+async function pollJob(jobId, intervalMs = 3000, timeoutMs = 180000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const res = await fetch(`${API}/proposal/job/${jobId}`);
+    const job = await res.json();
+    if (job.status === 'done') return job;
+    if (job.status === 'error') throw new Error(job.error || 'Job failed');
+  }
+  throw new Error('Timed out waiting for Claude — please try again');
+}
+
 const EMPTY_CONTACT = { company: '', address: '', city: '', province: '', postal: '', attn: '', title: '' };
 
 export default function StepProposal({ parsed, answers, proposal, onProposalReady, onReset, onBack }) {
@@ -28,7 +40,8 @@ export default function StepProposal({ parsed, answers, proposal, onProposalRead
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Generation failed');
-      onProposalReady(data.proposal);
+      const job = await pollJob(data.jobId);
+      onProposalReady(job.proposal);
     } catch (err) {
       setError(err.message);
     } finally {
